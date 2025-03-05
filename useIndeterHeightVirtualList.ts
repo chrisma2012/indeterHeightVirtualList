@@ -8,35 +8,26 @@
 // 2、要开启浏览器缓存，不然列表项有图片的话会闪烁。
 // 3、滚动出现闪烁或者位置不一致的时候，注意检查列表子项的高度是否准确。（例如：内容可能有margin超出了子项的容器等，注意overflow:hidden包裹）
 
-// import { debounce } from '@/utils'
+import { debounce } from '@/utils'
 import { DommScroll } from '@/utils/dom-scroll'
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import type { Ref } from 'vue'
 
-// const imgMapHeight = new Map()
-
-// import testJson from './test.json'
 interface IndeterHeightVirtualListConfig<T> {
-  data: Ref<T[]> // 数据源
+  dataChangeFlag: Ref<number> //判断是否有有新数据渲染的标志位
   scrollContainer: string // 滚动容器的元素选择器
   actualHeightContainer: string // 用于撑开高度的元素
   translateContainer: string // 用于偏移的元素选择器
   itemContainer: string // 列表项选择器
   itemHeight: number // 列表项高度，//元素高度和外边距
-  imageItemHeight: number // 图片元素中图片的固定高度，默认给图片设定高度，用户可通过点击放大查看
+  // imageItemHeight: number // TODO图片元素中图片的固定高度，默认给图片设定高度，用户可通过点击放大查看
   size: number // 每次渲染数据量
   minimumLeftItems?: number //当列表剩余最少几条记录的时候触发数据加载，注意该值不能和接口请求的分页size字段值一致。否则不会发起请求
-  msgImgSelector?: string //消息列表的图片类名，用于监听onload事件，更新容器高度
-  // maxItemHeight?: number //用于倒序列表判断是否要自动往上滚的 差值。 当 scrollContainer.offsetHeight + scrollContainer.scrollTop <= maxItemHeight 时，列表会自动往上滚动。此操作经常用于收到新消息上滚
 }
 
 type HtmlElType = HTMLElement | null
 
-interface extendsT {
-  imgSrc?: string
-}
-
-export default function useIndeterHeightVirtualList<T extends extendsT>(config: IndeterHeightVirtualListConfig<T>) {
+export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirtualListConfig<T>) {
   // 获取元素
   let actualHeightContainerEl: HtmlElType = null,
     translateContainerEl: HtmlElType = null,
@@ -65,6 +56,7 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
   let curStartIndex = 0
   //定时器
   let timerHandler
+  let resizeObserverInstance: ResizeObserver | null
 
   const minimumLeftItems: number = config.minimumLeftItems ? config.minimumLeftItems : 8
 
@@ -78,22 +70,14 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
     )
   }
 
-  //计算图片高度
-  // const caculateImgHeight = (imgSrc: string, index: number, listItemHeightMap) => {
-  //   if (imgMapHeight.get(imgSrc)) return
-  //   let imgDom: HTMLImageElement | null = document.createElement('img')
-  //   imgDom.src = imgSrc
-  //   imgDom.onload = () => {
-  //     imgMapHeight.set(imgSrc, imgDom!.offsetHeight)
-  //     listItemHeightMap[index] =  imgDom!.offsetHeight
-  //     imgDom = null
-
-  //   }
-  // }
-
   // 更新实际高度
   const updateActualHeight = (actualHeight: number) => {
     actualHeightContainerEl!.style.height = actualHeight + 'px'
+  }
+
+  // 获取缓存高度，无缓存，取配置项的 itemHeight
+  const getItemHeightFromMap = (index: number | string) => {
+    return listItemHeightMap[index] ?? config.itemHeight //?? 因为有的dom高度为0
   }
 
   // 缓存已渲染元素的高度
@@ -101,10 +85,7 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
 
   // 更新已渲染列表项的缓存高度
   const updateItemHeightMapByRenderDom = (index: number) => {
-    //needScroll用于底部有新消息并且当前不在列表底部的情况，滚动到bb
     // // 当所有元素的实际高度更新完毕，就不需要重新计算高度
-    //这里会导致一个问题。如果一个图片没有加载完就被记录了高度，后续都不会再更新其高度到RenderedItemsCache。
-    //因为这里直接返回了。
     if (!(Object.keys(listItemHeightMap).length < dataSource.length) && !isScrollToBottom) {
       return
     }
@@ -114,6 +95,7 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
       clearTimeout(timerHandler)
     }
     timerHandler = setTimeout(() => {
+      if (!translateContainerEl?.children) return
       // 获取所有列表项元素
       let Items: HTMLElement[] = Array.from(translateContainerEl?.children!) as HTMLElement[]
       const lastItemIndex = Items.length + index - 1
@@ -127,15 +109,17 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
       // 更新实际高度
       updateActualHeight(curActualHeight)
       const distance = actualHeightContainerEl?.offsetHeight! - scrollContainerEl?.offsetHeight!
-
+      //倘若消息列表的高度小于容器高度
+      if (distance < 0) {
+        isScrollToBottom = false
+      }
+      //如果带滚动的列表条数大于30条，则默认每次的pagesize为200。
+ 
       //倒序渲染。视口处于列表的底部，则收到新消息时，自动往上滚动
-      // needScroll 倒序首次渲染需要滚动到最底部 或者当前不在列表底部时接收到了新消息，点击回到底部的时候亦要为true
-
-      // console.log('不是正在滚到底部', !isScrollToBottom, '不是手动滚动状态', !isManualStatus, '滚动距离', distance)
+      // 单条多条消息的接收滚动使用这个
       if (!isScrollToBottom && !isManualStatus && distance > 0) {
         if (ScrollDom.getScrollStatus()) {
           //如果还在滚动，则和上次未滚完的一起滚
-          // console.warn('一起滚')
           lastScrollDistance = distance - lastScrollDistance
           ScrollDom.scroll(lastScrollDistance)
         } else {
@@ -144,20 +128,15 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
         }
       }
 
+      //一次性滚动到底使用这个
       if (isScrollToBottom) {
-        nextTick(() => {
-          //滚动距离直接取actualHeightContainerEl?.offsetHeight。因为是实时更新的，不用计算
-          ScrollDom.scrollByConstantSpeed(actualHeightContainerEl?.offsetHeight!)
-        })
+        //滚动距离直接取actualHeightContainerEl?.offsetHeight。因为是实时更新的，不用计算
+        // console.warn('滚动的距离', actualHeightContainerEl?.offsetHeight!)
+        ScrollDom.scrollByConstantSpeed(actualHeightContainerEl?.offsetHeight!)
       }
 
       Items.length = 0
-    }, 100)
-  }
-
-  // 获取缓存高度，无缓存，取配置项的 itemHeight
-  const getItemHeightFromMap = (index: number | string) => {
-    return listItemHeightMap[index] ?? config.itemHeight //?? 因为有的dom高度为0
+    }, 10)
   }
 
   // 实际渲染的数据
@@ -169,6 +148,7 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
     //一次性滚动到底部的时候，取size=200。因为size值偏小，
     //滚动会出现卡顿的视觉效果。其他时候去默认的config.size值
     const size = isScrollToBottom ? pageSize : config.size
+    // console.warn('滚动的页面大小', size)
     for (let i = 0; i < dataSource.length; i++) {
       offsetHeight += getItemHeightFromMap(i)
       if (offsetHeight >= scrollTop) {
@@ -188,7 +168,6 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
       needLoadData.value = Date.now()
     }
 
-    // TODO 长时间待机后，应用重新获得焦点时，会有一个长距离滚动到底的场景。需要处理成一键滚动到底的效果。
     // 计算得出的渲染数据
     renderData.value = dataSource.slice(startIndex, startIndex + size)
 
@@ -205,97 +184,91 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
     translateContainerEl!.style.transform = `translateY(${offset}px)`
   }
 
-  // const addImgLoadLisenter = () => {
-  //   //TODO 为了兼容 93行的setTimeout
-  //   const children = translateContainerEl?.children!
-  //   const childImgNodeArr = Array.from(children).map((item, index) => {
-  //     item.setAttribute('data-record-index', `${curStartIndex + index}`)
-  //     return item.querySelector(config.msgImgSelector!)
-  //   })
-
-  //   childImgNodeArr.forEach((item: HTMLImageElement, index: number) => {
-  //     if (!item) return
-  //     const parentIndex = curStartIndex + index
-  //     item.onload = function () {
-  //       const parentDom = translateContainerEl?.querySelector(`[data-record-index='${parentIndex}']`)
-  //       if (!parentDom) return
-  //       const newItemHeight = (parentDom as HTMLElement).offsetHeight
-  //       const oldItemHeight = listItemHeightMap[parentIndex] || 0 //这里跟已记录的图片高度对比。
-  //       if (oldItemHeight === newItemHeight) return
-  //       listItemHeightMap[parentIndex] = newItemHeight
-  //       curActualHeight += newItemHeight - oldItemHeight
-  //       console.warn('更新图片高度', curActualHeight)
-  //       updateActualHeight(curActualHeight)
-  //       ScrollDom.scroll(curActualHeight)
-  //       item.onload = null
-  //     }
-  //   })
-  // }
-
- 
-
-  // const listenNormalScrollEnd = () => {
-  //   if (isListBottom()) {
-  //     //滚动底部的时候，监听图片加载，以解决图片还未加载完毕，列表记录了错误的图片列表元素高度
-  //     // addImgLoadLisenter()
-  //   }
-  // }
-  const listenScrollEnd = () => {
-    const scrollEndListener = (e) => {
-      //必须要异步。以规避  收到新消息时，自动往上滚动 的逻辑。因为那里也是异步
-      // 就这里  if (!isScrollToBottom  && !isManualStatus && distance > 0)
-      setTimeout(() => {
-        isScrollToBottom = false //滚动到底部之后，将滚动到底的状态置为false
-        isManualStatus = false //置底为非人工干预状态
-        scrollContainerEl?.removeEventListener('scrollend', scrollEndListener)
-        // scrollContainerEl?.addEventListener('scrollend', listenNormalScrollEnd)
-      })
-    }
-    // scrollContainerEl?.removeEventListener('scrollend', listenNormalScrollEnd)
-    scrollContainerEl?.addEventListener('scrollend', scrollEndListener)
-  }
-
   //回到底部
   const scrollToBottom = () => {
-    if (isListBottom()) {
-      isManualStatus = false //置底为非人工干预状态
-      isScrollToBottom = false
-      return //已经在底部则直接返回
-    }
-    listenScrollEnd()
     isScrollToBottom = true
-
     getRealRenderListData(curScrollTop)
   }
+
   // 滚动事件
   const handleScroll = ({ target }) => {
     const isAtBottom = isListBottom()
+    // console.warn('=-=',curStartIndex + renderData.value.length  , dataSource.length , isAtBottom , isScrollToBottom)
+    if (curStartIndex + renderData.value.length === dataSource.length && isAtBottom && isScrollToBottom) {
+      return setTimeout(() => {
+        isScrollToBottom = false //滚动到底部之后，将滚动到底的状态置为false
+        isManualStatus = false //置底为非人工干预状态
+      }, 12)
+    }
+
     //手动滚到底部，也视作为 非手动干预状态
     isManualStatus = !isAtBottom
-    ScrollDom.setScrollPermission(isManualStatus) //中止新消息导致的列表滚动
-    getRealRenderListData(target.scrollTop)
+    ScrollDom.setScrollPermission(isAtBottom) //中止新消息导致的列表滚动
+
     //滚动到底部的时候将《有新消息》置false
     if (
       actualHeightContainerEl?.offsetHeight! - (scrollContainerEl?.offsetHeight! + target.scrollTop) <=
       config.itemHeight
     ) {
+      // getRealRenderListData(target.scrollTop)
       hasNewMessage.value = false
     }
+
+    // 一次性滚动到底
+    if (
+      actualHeightContainerEl?.offsetHeight! - (scrollContainerEl?.offsetHeight! + target.scrollTop) <=
+        config.itemHeight 
+    ) {
+      // console.log(curStartIndex + renderData.value.length, dataSource.length, '开始滚动的位置', target.scrollTop)
+
+      return getRealRenderListData(target.scrollTop)
+    }
+
+    if (!isScrollToBottom) getRealRenderListData(target.scrollTop)
   }
 
   const resetIndeterHeightVirtualList = () => {
-    if (scrollContainerEl) scrollContainerEl.scrollTop = 0
+    if (!scrollContainerEl || !actualHeightContainerEl) return
+    scrollContainerEl.scrollTop = 0
     listItemHeightMap = {}
     updateItemHeightMapByRenderDom(0)
+    actualHeightContainerEl.style.display = 'none' // 解决列表数据为空再置为有值时导致的视觉抖动
+
     curScrollTop = 0
     curStartIndex = 0
     curActualHeight = 0
     lastScrollDistance = 0
-    listenScrollEnd()
+    // listenScrollEnd()
     updateActualHeight(scrollContainerEl?.offsetHeight!)
+    actualHeightContainerEl!.style.display = 'block'
   }
 
- 
+  const setVirtualListData = (list) => {
+    dataSource = list
+  }
+
+  //监听窗口尺寸变化
+  const addDomResizeListener = (targetDom) => {
+    let isFirstTime = true
+    let lastDomHeight = translateContainerEl!.offsetHeight
+    resizeObserverInstance = new ResizeObserver(
+      debounce(function () {
+        if (isFirstTime) return (isFirstTime = false)
+        //只需要监听translateContainerEl元素的高度变化即可，因为actualHeightContainerEl，scrollContainer的高度是写死的
+        if (lastDomHeight === translateContainerEl!.offsetHeight) return
+        lastDomHeight = translateContainerEl!.offsetHeight
+        // console.warn('窗口变化导致的列表重绘')
+        resetIndeterHeightVirtualList()
+        // getRealRenderListData(curScrollTop)
+        scrollToBottom()
+      }, 600)
+    )
+    resizeObserverInstance.observe(targetDom, { box: 'border-box' })
+  }
+  const removeDomResizeListener = () => {
+    resizeObserverInstance!.disconnect()
+    resizeObserverInstance = null
+  }
 
   onMounted(() => {
     const { actualHeightContainer, scrollContainer, translateContainer } = config
@@ -308,18 +281,18 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
 
     // 注册滚动事件
     scrollContainerEl?.addEventListener('scroll', handleScroll)
-    listenScrollEnd()
+    addDomResizeListener(scrollContainerEl)
+    // listenScrollEnd()
 
     let firstMsgNum = 0
     // 数据源发生变动
     watch(
-      () => config.data.value,
-      (newVal) => {
-        if (firstMsgNum === 0) firstMsgNum = newVal.length
+      () => config.dataChangeFlag.value,
+      () => {
+        if (firstMsgNum === 0) firstMsgNum = dataSource.length
         //如果最新的数据长度跟旧的列表长度一致，则判定没有新的消息记录请求了
         needRequestDataOnceAgain = true
-        // 更新数据源
-        dataSource = newVal
+
         //倒序、非第一次赋值、出现滚动条了
         //dataSource.length > 3 dataSource默认会有3条。此处与业务耦合了，要改成通用的，此处需去掉
         if (dataSource.length > 3 && scrollContainerEl?.offsetHeight! < actualHeightContainerEl?.offsetHeight!) {
@@ -332,24 +305,18 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
               //手动干预的状态才显示《新消息》
               hasNewMessage.value = true
             }
+
             return
           }
+
           //倒序渲染，非第一次赋值后，后续均用updateRenderDataForward
           return getRealRenderListData(curScrollTop)
+          // return scrollToBottom()
         }
-        if (firstMsgNum === newVal.length) {
-          isScrollToBottom = true
-        }
-
-        nextTick(() => {
-          //处理首次渲染时，没有出现滚动条需要isScrollToBottom = false
-          if (scrollContainerEl?.offsetHeight! > actualHeightContainerEl?.offsetHeight!) {
-            isScrollToBottom = false
-          }
-        })
-        getRealRenderListData(0)
-      },{
-        immediate:true
+        scrollToBottom()
+      },
+      {
+        immediate: true
       }
     )
   })
@@ -357,12 +324,14 @@ export default function useIndeterHeightVirtualList<T extends extendsT>(config: 
   // 移除滚动事件
   onBeforeUnmount(() => {
     scrollContainerEl?.removeEventListener('scroll', handleScroll)
+    removeDomResizeListener()
     actualHeightContainerEl = null
     scrollContainerEl = null
     translateContainerEl = null
   })
   return {
     renderData,
+    setVirtualListData,
     needLoadData,
     hasNewMessage,
     resetIndeterHeightVirtualList,
