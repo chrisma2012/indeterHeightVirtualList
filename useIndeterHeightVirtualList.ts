@@ -9,7 +9,7 @@
 // 3、滚动出现闪烁或者位置不一致的时候，注意检查列表子项的高度是否准确。（例如：内容可能有margin超出了子项的容器等，注意overflow:hidden包裹）
 
 import { debounce } from '@/utils'
-import { DommScroll } from '@/utils/dom-scroll'
+import { DomScroll } from '@/utils/dom-scroll'
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import type { Ref } from 'vue'
 import useIsManualScroll from './useIsManualScroll'
@@ -45,7 +45,7 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
   // 给业务组件监听的标志位，底部是否有新的消息可查看
   const hasNewMessage = ref(false)
   //滚动对象
-  let ScrollDom: DommScroll
+  let ScrollDom: DomScroll
   //上一次滚动的距离
   let lastScrollDistance = 0
   //区分是否手动干预过的状态
@@ -58,6 +58,7 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
   //定时器
   let timerHandler
   let resizeObserverInstance: ResizeObserver | null
+  let scrollToBottomTimeoutHandler
 
   const minimumLeftItems: number = config.minimumLeftItems ? config.minimumLeftItems : 8
 
@@ -121,20 +122,22 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
       //倒序渲染。视口处于列表的底部，则收到新消息时，自动往上滚动
       // 单条多条消息的接收滚动使用这个
       if (!isScrollToBottom && !isManualScrollStatus.value && distance > 0) {
-        if (ScrollDom.getScrollStatus()) {
-          //如果还在滚动，则和上次未滚完的一起滚
-          lastScrollDistance = distance - lastScrollDistance
-          ScrollDom.scroll(lastScrollDistance)
-        } else {
-          lastScrollDistance = distance - scrollContainerEl?.scrollTop!
-          ScrollDom.scroll(lastScrollDistance)
-        }
+        lastScrollDistance = ScrollDom.getScrollStatus()
+          ? distance - lastScrollDistance
+          : distance - scrollContainerEl?.scrollTop!
+        ScrollDom.scroll(lastScrollDistance)
       }
 
       //一次性滚动到底使用这个
       if (isScrollToBottom) {
         //滚动距离直接取actualHeightContainerEl?.offsetHeight。因为是实时更新的，不用计算
-        ScrollDom.scrollByConstantSpeed(actualHeightContainerEl?.offsetHeight!)
+        nextTick(() => {
+          ScrollDom.scrollByConstantSpeed(actualHeightContainerEl?.offsetHeight!)
+          if (curStartIndex + renderData.value.length === dataSource.length && isListBottom()) {
+            isScrollToBottom = false //滚动到底部之后，将滚动到底的状态置为false
+            isManualScrollStatus.value = false //置底为非人工干预状态
+          }
+        })
       }
 
       Items.length = 0
@@ -142,7 +145,7 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
   }
 
   // 实际渲染的数据
-  const renderData: Ref<T[]> = ref([])
+  const renderData: Ref<readonly T[]> = ref([])
   // 更新实际渲染数据
   const getRealRenderListData = (scrollTop: number, pageSize: number = 200) => {
     let startIndex = 0
@@ -150,7 +153,6 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
     //一次性滚动到底部的时候，取size=200。因为size值偏小，
     //滚动会出现卡顿的视觉效果。其他时候去默认的config.size值
     const size = isScrollToBottom ? pageSize : config.size
-    // console.warn('滚动的页面大小', size)
     for (let i = 0; i < dataSource.length; i++) {
       offsetHeight += getItemHeightFromMap(i)
       if (offsetHeight >= scrollTop) {
@@ -171,7 +173,7 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
     }
 
     // 计算得出的渲染数据
-    renderData.value = dataSource.slice(startIndex, startIndex + size)
+    renderData.value = Object.freeze(dataSource.slice(startIndex, startIndex + size))
 
     // 缓存最新的列表项高度
     updateItemHeightMapByRenderDom(startIndex)
@@ -193,42 +195,24 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
   }
   //js调用 回到底部
   const scrollToBottom = () => {
-    if (isManualScrollStatus.value) return
+    if (isManualScrollStatus.value || isListBottom()) return
     isScrollToBottom = true
     getRealRenderListData(curScrollTop)
   }
 
   // 滚动事件
   const handleScroll = ({ target }) => {
-    const isAtBottom = isListBottom()
-    if (curStartIndex + renderData.value.length === dataSource.length && isAtBottom && isScrollToBottom) {
-      return setTimeout(() => {
-        isScrollToBottom = false //滚动到底部之后，将滚动到底的状态置为false
-        // isManualStatus = false //置底为非人工干预状态
-        isManualScrollStatus.value = false //置底为非人工干预状态
-      }, 12)
-    }
-
     //手动滚到底部，也视作为 非手动干预状态
-    // isManualStatus = !isAtBottom
-    ScrollDom.setScrollPermission(isAtBottom) //中止新消息导致的列表滚动
-
+    ScrollDom.setScrollPermission(isListBottom()) //中止新消息导致的列表滚动
+    // 一次性滚动到底
+    getRealRenderListData(target.scrollTop)
     //滚动到底部的时候将《有新消息》置false
     if (
       actualHeightContainerEl?.offsetHeight! - (scrollContainerEl?.offsetHeight! + target.scrollTop) <=
       config.itemHeight
     ) {
-      // getRealRenderListData(target.scrollTop)
       hasNewMessage.value = false
     }
-    // console.warn(curStartIndex + renderData.value.length, dataSource.length, !isScrollToBottom)
-    // actualHeightContainerEl?.offsetHeight! - (scrollContainerEl?.offsetHeight! + target.scrollTop) <=
-    //   config.itemHeight
-    // 一次性滚动到底
-    if (curStartIndex + renderData.value.length <= dataSource.length) {
-      return getRealRenderListData(target.scrollTop)
-    }
-    if (!isScrollToBottom) getRealRenderListData(target.scrollTop)
   }
 
   const resetIndeterHeightVirtualList = () => {
@@ -242,13 +226,12 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
     curStartIndex = 0
     curActualHeight = 0
     lastScrollDistance = 0
-    // listenScrollEnd()
     updateActualHeight(scrollContainerEl?.offsetHeight!)
     actualHeightContainerEl!.style.display = 'block'
   }
 
   const setVirtualListData = (list) => {
-    dataSource = list
+    dataSource = Object.freeze(list)
   }
 
   //监听窗口尺寸变化
@@ -261,10 +244,8 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
         //只需要监听translateContainerEl元素的高度变化即可，因为actualHeightContainerEl，scrollContainer的高度是写死的
         if (lastDomHeight === translateContainerEl!.offsetHeight) return
         lastDomHeight = translateContainerEl!.offsetHeight
-        // console.warn('窗口变化导致的列表重绘')
         resetIndeterHeightVirtualList()
-        // getRealRenderListData(curScrollTop)
-        scrollToBottom()
+        scrollToBottomByButton()
       }, 600)
     )
     resizeObserverInstance.observe(targetDom, { box: 'border-box' })
@@ -281,7 +262,7 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
     scrollContainerEl = typeof scrollContainer === 'string' ? document.querySelector(scrollContainer) : scrollContainer
     translateContainerEl =
       typeof translateContainer === 'string' ? document.querySelector(translateContainer) : translateContainer
-    ScrollDom = new DommScroll(scrollContainerEl)
+    ScrollDom = new DomScroll(scrollContainerEl)
 
     // 注册滚动事件
     scrollContainerEl?.addEventListener('scroll', handleScroll)
@@ -314,7 +295,7 @@ export default function useIndeterHeightVirtualList<T>(config: IndeterHeightVirt
           //倒序渲染，非第一次赋值后，后续均用updateRenderDataForward
           return getRealRenderListData(curScrollTop)
         }
-        scrollToBottom()
+        scrollToBottomByButton()
       },
       {
         immediate: true
